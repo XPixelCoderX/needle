@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEEDLE // Difficulty Levels</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: #070914;
+    color: #e8f7ff;
+    font: 16px system-ui, sans-serif;
+  }
+  .wrap { width: min(96vw, 900px); }
+  canvas {
+    display: block;
+    width: 100%;
+    background: #090e1b;
+    border: 1px solid #30445f;
+    box-shadow: 0 0 50px #00c8ff18;
+  }
+  .hint {
+    text-align: center;
+    color: #8295ab;
+    font-size: 13px;
+    margin: 10px 0;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="game" width="900" height="560"></canvas>
+  <div class="hint">WASD / ARROWS: move · SPACE: dash · R: restart</div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const levels = [
+    { name: "EASY",   cores: 8,  time: 60, shot: 1.15, speed: 155, spread: 1, beam: 6.0, dash: 1.6 },
+    { name: "NORMAL", cores: 12, time: 45, shot: 0.72, speed: 195, spread: 3, beam: 4.2, dash: 2.25 },
+    { name: "HARD",   cores: 15, time: 38, shot: 0.48, speed: 245, spread: 3, beam: 3.1, dash: 2.8 },
+    { name: "INSANE", cores: 18, time: 32, shot: 0.30, speed: 300, spread: 5, beam: 2.2, dash: 3.3 }
+  ];
+
+  let selected = 1;
+  let state = "title";
+  let player = null;
+  let bullets = [];
+  let particles = [];
+  let core = null;
+  let beam = null;
+  let collected = 0;
+  let time = 0;
+  let shotClock = 0;
+  let beamClock = 0;
+  let shake = 0;
+  let last = 0;
+  let dashDirection = { x: 1, y: 0 };
+
+  const keys = new Set();
+  const stars = Array.from({ length: 95 }, () => ({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    r: Math.random() * 1.4 + 0.3
+  }));
+
+  function level() {
+    return levels[selected];
+  }
+
+  function spawnCore() {
+    let x, y;
+    do {
+      x = 42 + Math.random() * (W - 84);
+      y = 65 + Math.random() * (H - 107);
+    } while (Math.hypot(x - player.x, y - player.y) < 155);
+    core = { x, y, pulse: 0 };
+  }
+
+  function reset() {
+    player = { x: W / 2, y: H / 2, r: 7, dash: 0, cooldown: 0 };
+    bullets = [];
+    particles = [];
+    beam = null;
+    collected = 0;
+    time = level().time;
+    shotClock = 1.1;
+    beamClock = level().beam;
+    shake = 0;
+    dashDirection = { x: 1, y: 0 };
+    spawnCore();
+    state = "playing";
+  }
+
+  function burst(x, y, color, count = 16) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const speed = 35 + Math.random() * 160;
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed,
+        life: 0.25 + Math.random() * 0.45,
+        color
+      });
+    }
+  }
+
+  function shoot() {
+    const side = Math.floor(Math.random() * 4);
+    let x, y;
+
+    if (side === 0) { x = -12; y = Math.random() * H; }
+    if (side === 1) { x = W + 12; y = Math.random() * H; }
+    if (side === 2) { x = Math.random() * W; y = -12; }
+    if (side === 3) { x = Math.random() * W; y = H + 12; }
+
+    const aim = Math.atan2(player.y - y, player.x - x);
+    const offsets = level().spread === 1 ? [0]
+                  : level().spread === 3 ? [-0.16, 0, 0.16]
+                  : [-0.30, -0.15, 0, 0.15, 0.30];
+    const difficultyRamp = 1 - time / level().time;
+    const speed = level().speed + difficultyRamp * 90;
+
+    for (const offset of offsets) {
+      const a = aim + offset;
+      bullets.push({
+        x, y,
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed,
+        r: offset === 0 ? 5 : 4
+      });
+    }
+  }
+
+  function startBeam() {
+    const vertical = Math.random() < 0.5;
+    beam = {
+      vertical,
+      pos: vertical
+        ? 65 + Math.random() * (W - 130)
+        : 75 + Math.random() * (H - 150),
+      phase: "warning",
+      t: selected === 3 ? 0.65 : 0.85
+    };
+  }
+
+  function die() {
+    if (state !== "playing") return;
+    burst(player.x, player.y, "#ff527c", 38);
+    shake = 12;
+    state = "dead";
+  }
+
+  window.addEventListener("keydown", e => {
+    const k = e.key.toLowerCase();
+
+    if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k)) {
+      e.preventDefault();
+    }
+    keys.add(k);
+
+    if (state !== "playing" && /^[1-4]$/.test(k)) {
+      selected = Number(k) - 1;
+      state = "title";
+    } else if (k === "r") {
+      reset();
+    } else if (state !== "playing" && (k === "enter" || k === " ")) {
+      reset();
+    } else if (
+      state === "playing" &&
+      k === " " &&
+      player.cooldown <= 0 &&
+      player.dash <= 0
+    ) {
+      player.dash = 0.17;
+      player.cooldown = level().dash;
+      burst(player.x, player.y, "#79f6ff", 8);
+    }
+  });
+
+  window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+  window.addEventListener("blur", () => keys.clear());
+
+  function update(dt) {
+    for (const p of particles) {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life -= dt;
+    }
+    particles = particles.filter(p => p.life > 0);
+    shake = Math.max(0, shake - 40 * dt);
+
+    if (state !== "playing") return;
+
+    time -= dt;
+    if (time <= 0) {
+      time = 0;
+      die();
+      return;
+    }
+
+    const dx = Number(keys.has("d") || keys.has("arrowright"))
+             - Number(keys.has("a") || keys.has("arrowleft"));
+    const dy = Number(keys.has("s") || keys.has("arrowdown"))
+             - Number(keys.has("w") || keys.has("arrowup"));
+    const length = Math.hypot(dx, dy);
+
+    if (length && player.dash <= 0) {
+      dashDirection = { x: dx / length, y: dy / length };
+    }
+
+    const invulnerable = player.dash > 0;
+    const direction = invulnerable
+      ? dashDirection
+      : length ? { x: dx / length, y: dy / length } : { x: 0, y: 0 };
+    const speed = invulnerable ? 790 : 255;
+
+    player.x = Math.max(player.r, Math.min(W - player.r, player.x + direction.x * speed * dt));
+    player.y = Math.max(player.r, Math.min(H - player.r, player.y + direction.y * speed * dt));
+    player.dash = Math.max(0, player.dash - dt);
+    player.cooldown = Math.max(0, player.cooldown - dt);
+
+    core.pulse += dt * 5;
+    if (Math.hypot(player.x - core.x, player.y - core.y) < player.r + 12) {
+      burst(core.x, core.y, "#ffe889", 22);
+      collected++;
+      shake = 3;
+
+      if (collected >= level().cores) {
+        state = "won";
+        return;
+      }
+      spawnCore();
+    }
+
+    shotClock -= dt;
+    if (shotClock <= 0) {
+      shoot();
+      const ramp = 1 - time / level().time;
+      shotClock = Math.max(0.16, level().shot * (1 - ramp * 0.35));
+    }
+
+    beamClock -= dt;
+    if (beamClock <= 0 && !beam) {
+      startBeam();
+      beamClock = level().beam;
+    }
+
+    if (beam) {
+      beam.t -= dt;
+      if (beam.t <= 0) {
+        if (beam.phase === "warning") {
+          beam.phase = "live";
+          beam.t = 0.48;
+        } else {
+          beam = null;
+        }
+      }
+
+      if (beam && beam.phase === "live" && !invulnerable) {
+        const distance = beam.vertical
+          ? Math.abs(player.x - beam.pos)
+          : Math.abs(player.y - beam.pos);
+        if (distance < player.r + 12) {
+          die();
+          return;
+        }
+      }
+    }
+
+    for (const b of bullets) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      if (!invulnerable && Math.hypot(b.x - player.x, b.y - player.y) < b.r + player.r) {
+        die();
+        return;
+      }
+    }
+
+    bullets = bullets.filter(b =>
+      b.x > -25 && b.x < W + 25 && b.y > -25 && b.y < H + 25
+    );
+  }
+
+  function text(str, x, y, size, color = "#e8f7ff", align = "left") {
+    ctx.fillStyle = color;
+    ctx.font = `bold ${size}px system-ui, sans-serif`;
+    ctx.textAlign = align;
+    ctx.fillText(str, x, y);
+  }
+
+  function draw() {
+    ctx.save();
+    if (shake) {
+      ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+    }
+
+    ctx.fillStyle = "#090e1b";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = "#152439";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= W; x += 40) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= H; y += 40) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+    for (const s of stars) {
+      ctx.fillStyle = "#456079";
+      ctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+
+    if (beam) {
+      const warning = beam.phase === "warning";
+      ctx.save();
+      ctx.strokeStyle = warning ? "#ffda6b" : "#ff426e";
+      ctx.lineWidth = warning ? 2 : 25;
+      ctx.globalAlpha = warning
+        ? 0.35 + Math.sin(performance.now() / 65) * 0.25
+        : 0.24;
+      ctx.beginPath();
+      if (beam.vertical) {
+        ctx.moveTo(beam.pos, 0);
+        ctx.lineTo(beam.pos, H);
+      } else {
+        ctx.moveTo(0, beam.pos);
+        ctx.lineTo(W, beam.pos);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = warning ? 2 : 3;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (core && state !== "title") {
+      const glow = 15 + Math.sin(core.pulse) * 3;
+      ctx.fillStyle = "#ffe88922";
+      ctx.beginPath();
+      ctx.arc(core.x, core.y, glow + 9, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#ffe889";
+      ctx.beginPath();
+      ctx.moveTo(core.x, core.y - glow);
+      ctx.lineTo(core.x + glow * 0.7, core.y);
+      ctx.lineTo(core.x, core.y + glow);
+      ctx.lineTo(core.x - glow * 0.7, core.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    for (const b of bullets) {
+      ctx.fillStyle = "#ff537f";
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r + 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffd0db";
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r - 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    for (const p of particles) {
+      ctx.globalAlpha = Math.min(1, p.life * 3);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+
+    if (player && state !== "dead" && state !== "title") {
+      ctx.fillStyle = player.dash > 0 ? "#ffffff" : "#79f6ff";
+      ctx.shadowColor = "#79f6ff";
+      ctx.shadowBlur = player.dash > 0 ? 28 : 14;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    if (state !== "title") {
+      text(`${level().name}  ·  CORES ${collected}/${level().cores}`,
+        24, 35, 18, "#ffe889");
+      text(`TIME ${time.toFixed(1)}`, W - 24, 35, 19,
+        time < 10 ? "#ff537f" : "#e8f7ff", "right");
+      text(player.cooldown <= 0 ? "DASH READY" : `DASH ${player.cooldown.toFixed(1)}s`,
+        W / 2, 35, 15,
+        player.cooldown <= 0 ? "#79f6ff" : "#71869d", "center");
+    }
+
+    if (state !== "playing") {
+      ctx.fillStyle = "#050912df";
+      ctx.fillRect(0, 0, W, H);
+
+      if (state === "title") {
+        text("NEEDLE", W / 2, 150, 52, "#79f6ff", "center");
+        text("Choose your suffering:", W / 2, 197, 17, "#cad9e8", "center");
+
+        levels.forEach((d, i) => {
+          const active = i === selected;
+          const y = 244 + i * 49;
+          if (active) {
+            ctx.fillStyle = "#173445";
+            ctx.fillRect(W / 2 - 235, y - 28, 470, 39);
+          }
+          text(`${i + 1}  ${d.name}`, W / 2 - 205, y, 19,
+            active ? "#ffe889" : "#9bacbf");
+          text(`${d.cores} cores · ${d.time}s`, W / 2 + 205, y, 15,
+            active ? "#ffe889" : "#9bacbf", "right");
+        });
+
+        text("PRESS 1–4 TO SELECT · ENTER TO PLAY",
+          W / 2, 482, 17, "#79f6ff", "center");
+      } else {
+        text(state === "won" ? "YOU SURVIVED." : "ONE HIT. GAME OVER.",
+          W / 2, 220, 42,
+          state === "won" ? "#79f6ff" : "#ff537f", "center");
+        text(state === "won"
+          ? `${level().name} cleared with ${time.toFixed(1)} seconds left.`
+          : `You collected ${collected} of ${level().cores} cores on ${level().name}.`,
+          W / 2, 275, 18, "#cad9e8", "center");
+        text("R TO RETRY · 1–4 TO CHANGE DIFFICULTY",
+          W / 2, 330, 17, "#ffe889", "center");
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function frame(timestamp) {
+    const dt = Math.min((timestamp - last) / 1000 || 0, 0.033);
+    last = timestamp;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
